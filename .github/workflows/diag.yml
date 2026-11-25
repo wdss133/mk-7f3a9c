@@ -67,9 +67,14 @@ jobs:
           sed -i '/\[build\]/,$d' wrangler-diag.toml
 
       - name: Minimal worker
+        continue-on-error: true
         working-directory: ./mail-worker
         run: |
           cat > src/mini.js <<'JS'
+          export class MailHub {
+            constructor(state, env) { this.state = state; this.env = env; }
+            async fetch() { return new Response('hub'); }
+          }
           export default {
             fetch() {
               return new Response('ALIVE-OK', { status: 200 });
@@ -83,6 +88,7 @@ jobs:
           curl -s -w "\nstatus=%{http_code}\n" --max-time 30 "https://wk-diag.2997875227.workers.dev/" | head -c 800
 
       - name: App wrapper
+        continue-on-error: true
         working-directory: ./mail-worker
         run: |
           cat > src/diag.js <<'JS'
