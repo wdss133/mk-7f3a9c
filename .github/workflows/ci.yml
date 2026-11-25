@@ -67,6 +67,34 @@ jobs:
           open(p, 'w').write(s)
           PY
           sed -n '1,22p' wrangler-run.toml
+          sed -i '/\[build\]/,$d' wrangler-run.toml
+
+      - name: Frontend
+        working-directory: ./mail-vue
+        run: |
+          pnpm install --frozen-lockfile
+          sed -i "s|^VITE_PWA_NAME = .*|VITE_PWA_NAME = 'Vault'|" .env.release
+          sed -i "s|^VITE_APP_TITLE = .*|VITE_APP_TITLE = 'Vault'|" .env.release
+          pnpm run build
+
+      - name: Rebrand
+        working-directory: ./mail-worker
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path('dist/index.html')
+          s = p.read_text(encoding='utf-8')
+          s = re.sub(r'<title>.*?</title>', '<title>Vault</title>', s, flags=re.S)
+          s = re.sub(r'<meta name="description"[^>]*>', '', s)
+          s = s.replace('alt="Cloud Mail"', 'alt="Vault"')
+          p.write_text(s, encoding='utf-8')
+          m = pathlib.Path('dist/manifest.webmanifest')
+          if m.exists():
+              t = m.read_text(encoding='utf-8')
+              t = t.replace('Cloud Mail', 'Vault')
+              m.write_text(t, encoding='utf-8')
+          print('rebranded', len(s))
+          PY
 
       - name: Deploy
         id: deploy
