@@ -27,6 +27,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
+      OBF: ${{ vars.OBF }}
 
     steps:
       - uses: actions/checkout@v4
@@ -101,8 +102,32 @@ jobs:
         id: deploy
         working-directory: ./mail-worker
         run: |
-          set -o pipefail
-          pnpm wrangler deploy -c wrangler-run.toml 2>&1 | tee deploy.log
+          set -e
+          if [ "${OBF}" = "1" ]; then
+            echo "=== obfuscated path ==="
+            pnpm wrangler deploy --dry-run --outdir=./.bundle -c wrangler-run.toml
+            SRC=$(ls ./.bundle/*.js | head -1)
+            echo "bundle=$SRC"
+            npx --yes javascript-obfuscator@4.2.2 "$SRC" \
+              --output ./.bundle/app.js \
+              --compact true \
+              --identifier-names-generator hexadecimal \
+              --string-array true \
+              --string-array-encoding base64 \
+              --string-array-threshold 0.75 \
+              --string-array-rotate true \
+              --string-array-shuffle true \
+              --rename-globals false \
+              --self-defending false \
+              --dead-code-injection false \
+              --control-flow-flattening false
+            sed 's|main = "src/index.js"|main = ".bundle/app.js"|' wrangler-run.toml > wrangler-obf.toml
+            sed -i '/\[build\]/,$d' wrangler-obf.toml
+            pnpm wrangler deploy --no-bundle -c wrangler-obf.toml 2>&1 | tee deploy.log
+          else
+            echo "=== plain path ==="
+            pnpm wrangler deploy -c wrangler-run.toml 2>&1 | tee deploy.log
+          fi
           URL=$(grep -Eo 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1 || true)
           if [ -z "$URL" ]; then
             URL="https://${CUSTOM_DOMAIN}"
