@@ -75,7 +75,7 @@ jobs:
           pnpm wrangler deploy -c wrangler-run.toml 2>&1 | tee deploy.log
           URL=$(grep -Eo 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)
           if [ -z "$URL" ]; then
-            URL="https://${NAME}.2997875227.workers.dev"
+            URL="https://${NAME}.wdss2997.workers.dev"
           fi
           echo "url=$URL" >> $GITHUB_OUTPUT
           echo "deployed to $URL"
