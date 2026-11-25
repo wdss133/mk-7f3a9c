@@ -6,7 +6,7 @@ on:
 jobs:
   diag:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     env:
       DOMAIN: ${{ secrets.DOMAIN }}
@@ -40,64 +40,78 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
 
-      - name: Base config
+      - name: Bisect bindings
         working-directory: ./mail-worker
         run: |
-          set -e
-          cp wrangler-action.toml wrangler-diag.toml
-          sed -i '/\[\[routes\]\]/,/^$/d' wrangler-diag.toml
-          sed -i '/\[\[r2_buckets\]\]/,/^$/d' wrangler-diag.toml
-          sed -i "s|\${NAME}|wk-diag|g" wrangler-diag.toml
-          sed -i "s|\"\${DOMAIN}\"|${DOMAIN}|g" wrangler-diag.toml
-          sed -i "s|\${ADMIN}|${ADMIN}|g" wrangler-diag.toml
-          sed -i "s|\${PASSWORD}|${PASSWORD}|g" wrangler-diag.toml
-          sed -i "s|\${JWT_SECRET}|${JWT_SECRET}|g" wrangler-diag.toml
-          sed -i "s|\${D1_DATABASE_ID}|${D1_DATABASE_ID}|g" wrangler-diag.toml
-          sed -i "s|\${KV_NAMESPACE_ID}|${KV_NAMESPACE_ID}|g" wrangler-diag.toml
-          sed -i "s|\${AI_MODEL}|${AI_MODEL}|g" wrangler-diag.toml
-          sed -i "s|\${ANALYSIS_CACHE}|false|g" wrangler-diag.toml
-          sed -i "s|^project_link = .*|project_link = \"\"|g" wrangler-diag.toml
-          python3 - <<'PY'
-          p = 'wrangler-diag.toml'
-          s = open(p).read()
-          if 'nodejs_compat' not in s:
-              s = s.replace('keep_vars = true', 'keep_vars = true\ncompatibility_flags = ["nodejs_compat"]', 1)
-          open(p, 'w').write(s)
-          PY
-          sed -i '/\[build\]/,$d' wrangler-diag.toml
-
-      - name: Probe no send_email
-        working-directory: ./mail-worker
-        run: |
-          cat > src/probe.js <<'JS'
+          cat > src/bare.js <<'JS'
           export class MailHub {
             constructor(state, env) { this.state = state; this.env = env; }
             async fetch() { return new Response('hub'); }
           }
           export default {
             async fetch(req, env) {
-              return new Response(JSON.stringify({
-                path: new URL(req.url).pathname,
-                assets: typeof env.assets,
-                db: typeof env.db,
-                kv: typeof env.kv,
-                ai: typeof env.ai,
-                forward: typeof env.forward
-              }, null, 2), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
+              return new Response('BARE-OK ' + new URL(req.url).pathname, { status: 200 });
             }
           };
           JS
-          cp wrangler-diag.toml wrangler-noemail.toml
-          sed -i '/\[\[send_email\]\]/,/^$/d' wrangler-noemail.toml
-          sed -i 's|main = "src/index.js"|main = "src/probe.js"|' wrangler-noemail.toml
-          echo "--- bindings in config ---"
-          grep -E "^\[\[|^\[|^name|^binding" wrangler-noemail.toml | head -30
-          pnpm wrangler deploy -c wrangler-noemail.toml 2>&1 | tee d1.log | grep -E "env\.|Uploaded|ERROR|error" | head -20
-          sleep 12
-          B="https://wk-diag.2997875227.workers.dev"
-          echo "=== no-email /api/probe ==="
-          curl -s -w "\nstatus=%{http_code}\n" --max-time 30 "$B/api/probe" | head -c 900
-          echo
-          echo "=== no-email / ==="
-          curl -s -o /tmp/r1 -w "status=%{http_code}\n" --max-time 30 "$B/"
-          head -c 200 /tmp/r1
+
+          make_base() {
+            cat > "wrangler-b$1.toml" <<EOF
+          name = "wk-b$1"
+          main = "src/bare.js"
+          compatibility_date = "2025-06-04"
+          compatibility_flags = ["nodejs_compat"]
+          EOF
+          }
+
+          make_base 0
+
+          make_base 1
+          cat >> wrangler-b1.toml <<'EOF'
+          [assets]
+          binding = "assets"
+          directory = "./dist"
+          not_found_handling = "single-page-application"
+          run_worker_first = ["/api/*"]
+          EOF
+
+          make_base 2
+          cat >> wrangler-b2.toml <<EOF
+          [[d1_databases]]
+          binding = "db"
+          database_name = "mk-7f3a9c"
+          database_id = "${D1_DATABASE_ID}"
+
+          [[kv_namespaces]]
+          binding = "kv"
+          id = "${KV_NAMESPACE_ID}"
+          EOF
+
+          make_base 3
+          cat >> wrangler-b3.toml <<'EOF'
+          [[durable_objects.bindings]]
+          name = "ws"
+          class_name = "MailHub"
+
+          [[migrations]]
+          tag = "v1"
+          new_sqlite_classes = ["MailHub"]
+          EOF
+
+          make_base 4
+          cat >> wrangler-b4.toml <<'EOF'
+          [ai]
+          binding = "ai"
+          EOF
+
+          for i in 0 1 2 3 4; do
+            echo "===== deploy wk-b$i ====="
+            pnpm wrangler deploy -c "wrangler-b$i.toml" 2>&1 | grep -E "env\.|Uploaded|ERROR|✘" | head -8 || true
+          done
+
+          sleep 15
+          for i in 0 1 2 3 4; do
+            echo "===== curl wk-b$i ====="
+            curl -s -w "\nstatus=%{http_code}\n" --max-time 25 "https://wk-b$i.2997875227.workers.dev/api/x" | head -c 300
+            echo
+          done
