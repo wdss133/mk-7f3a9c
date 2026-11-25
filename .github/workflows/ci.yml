@@ -51,6 +51,7 @@ jobs:
           cp wrangler-action.toml wrangler-run.toml
           sed -i '/\[\[r2_buckets\]\]/,/^$/d' wrangler-run.toml
           sed -i "s|\${NAME}|${NAME}|g" wrangler-run.toml
+          sed -i "s|^database_name = .*|database_name = \"mk-7f3a9c\"|g" wrangler-run.toml
           sed -i "s|\${CUSTOM_DOMAIN}|${CUSTOM_DOMAIN}|g" wrangler-run.toml
           sed -i "s|\"\${DOMAIN}\"|${DOMAIN}|g" wrangler-run.toml
           sed -i "s|\${ADMIN}|${ADMIN}|g" wrangler-run.toml
