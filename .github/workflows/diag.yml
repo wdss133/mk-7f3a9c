@@ -39,6 +39,7 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm run build
+          ls -la ../mail-worker/dist/ | head -20
 
       - name: Base config
         working-directory: ./mail-worker
@@ -66,69 +67,66 @@ jobs:
           PY
           sed -i '/\[build\]/,$d' wrangler-diag.toml
 
-      - name: Minimal worker
+      - name: Probe bindings
         continue-on-error: true
         working-directory: ./mail-worker
         run: |
-          cat > src/mini.js <<'JS'
+          cat > src/probe.js <<'JS'
           export class MailHub {
             constructor(state, env) { this.state = state; this.env = env; }
             async fetch() { return new Response('hub'); }
           }
           export default {
-            fetch() {
-              return new Response('ALIVE-OK', { status: 200 });
+            async fetch(req, env) {
+              const out = {
+                path: new URL(req.url).pathname,
+                assets: typeof env.assets,
+                db: typeof env.db,
+                kv: typeof env.kv,
+                ai: typeof env.ai,
+                r2: typeof env.r2,
+                forward: typeof env.forward,
+                hasAssetsBinding: !!env.assets,
+              };
+              return new Response(JSON.stringify(out, null, 2), {
+                status: 200,
+                headers: { 'content-type': 'application/json; charset=utf-8' }
+              });
             }
           };
           JS
-          sed 's|main = "src/index.js"|main = "src/mini.js"|' wrangler-diag.toml > wrangler-mini.toml
-          pnpm wrangler deploy -c wrangler-mini.toml
+          sed 's|main = "src/index.js"|main = "src/probe.js"|' wrangler-diag.toml > wrangler-probe.toml
+          pnpm wrangler deploy -c wrangler-probe.toml > deploy-probe.log 2>&1
+          grep -E "env\.|Uploaded|ERROR" deploy-probe.log | head -20
           sleep 10
-          echo "--- mini ---"
-          curl -s -w "\nstatus=%{http_code}\n" --max-time 30 "https://wk-diag.2997875227.workers.dev/" | head -c 800
+          B="https://wk-diag.2997875227.workers.dev"
+          echo "=== /api/probe (bindings) ==="
+          curl -s -w "\nstatus=%{http_code}\n" --max-time 30 "$B/api/probe" | head -c 800
+          echo "=== /index.html ==="
+          curl -s -o /tmp/ih -w "status=%{http_code}\n" --max-time 30 "$B/index.html"
+          head -c 120 /tmp/ih; echo
+          echo "=== / ==="
+          curl -s -o /tmp/root -w "status=%{http_code}\n" --max-time 30 "$B/"
+          head -c 200 /tmp/root; echo
 
-      - name: App wrapper
+      - name: Probe import only
         continue-on-error: true
         working-directory: ./mail-worker
         run: |
-          cat > src/diag.js <<'JS'
-          import worker from './index.js';
+          cat > src/importonly.js <<'JS'
+          import './index.js';
           import { MailHub } from './websocket/hub';
-
           export { MailHub };
-
-          function describe(e) {
-            if (!e) return 'empty error';
-            let out = '';
-            try {
-              out = (e.stack || e.message || String(e));
-              if (e.cause) out += '\nCAUSE: ' + describe(e.cause);
-            } catch (_) {
-              out = String(e);
-            }
-            return out;
-          }
-
           export default {
-            async fetch(req, env, ctx) {
-              try {
-                return await worker.fetch(req, env, ctx);
-              } catch (e) {
-                return new Response('DIAG-START\n' + describe(e) + '\nDIAG-END', {
-                  status: 200,
-                  headers: { 'content-type': 'text/plain; charset=utf-8' }
-                });
-              }
-            },
-            email: worker.email,
-            scheduled: worker.scheduled
+            fetch() {
+              return new Response('IMPORT-OK', { status: 200 });
+            }
           };
           JS
-          sed 's|main = "src/index.js"|main = "src/diag.js"|' wrangler-diag.toml > wrangler-app.toml
-          pnpm wrangler deploy -c wrangler-app.toml
+          sed 's|main = "src/index.js"|main = "src/importonly.js"|' wrangler-diag.toml > wrangler-imp.toml
+          pnpm wrangler deploy -c wrangler-imp.toml > deploy-imp.log 2>&1
+          tail -5 deploy-imp.log
           sleep 10
-          echo "--- app / ---"
-          curl -s -w "\nstatus=%{http_code}\n" --max-time 40 "https://wk-diag.2997875227.workers.dev/" | head -c 5000
-          echo
-          echo "--- app /api/init ---"
-          curl -s -w "\nstatus=%{http_code}\n" --max-time 60 "https://wk-diag.2997875227.workers.dev/api/init/${JWT_SECRET}" | head -c 5000
+          B="https://wk-diag.2997875227.workers.dev"
+          echo "=== /api/probe (import only) ==="
+          curl -s -w "\nstatus=%{http_code}\n" --max-time 30 "$B/api/probe" | head -c 800
