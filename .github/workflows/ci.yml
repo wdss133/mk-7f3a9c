@@ -74,9 +74,9 @@ jobs:
         run: |
           set -o pipefail
           pnpm wrangler deploy -c wrangler-run.toml 2>&1 | tee deploy.log
-          URL=$(grep -Eo 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          URL=$(grep -Eo 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1 || true)
           if [ -z "$URL" ]; then
-            URL="https://${NAME}.wdss2997.workers.dev"
+            URL="https://${CUSTOM_DOMAIN}"
           fi
           echo "url=$URL" >> $GITHUB_OUTPUT
 
