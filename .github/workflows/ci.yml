@@ -1,0 +1,153 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      NAME: ${{ secrets.NAME }}
+      DOMAIN: ${{ secrets.DOMAIN }}
+      ADMIN: ${{ secrets.ADMIN }}
+      PASSWORD: ${{ secrets.PASSWORD }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      AI_MODEL: ${{ secrets.AI_MODEL }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+      KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4.1.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Dependencies
+        working-directory: ./mail-worker
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve config
+        working-directory: ./mail-worker
+        run: |
+          set -e
+          cp wrangler-action.toml wrangler-run.toml
+          sed -i '/\[\[routes\]\]/,/^$/d' wrangler-run.toml
+          sed -i '/\[\[r2_buckets\]\]/,/^$/d' wrangler-run.toml
+          sed -i "s|\${NAME}|${NAME}|g" wrangler-run.toml
+          sed -i "s|\"\${DOMAIN}\"|${DOMAIN}|g" wrangler-run.toml
+          sed -i "s|\${ADMIN}|${ADMIN}|g" wrangler-run.toml
+          sed -i "s|\${PASSWORD}|${PASSWORD}|g" wrangler-run.toml
+          sed -i "s|\${JWT_SECRET}|${JWT_SECRET}|g" wrangler-run.toml
+          sed -i "s|\${D1_DATABASE_ID}|${D1_DATABASE_ID}|g" wrangler-run.toml
+          sed -i "s|\${KV_NAMESPACE_ID}|${KV_NAMESPACE_ID}|g" wrangler-run.toml
+          sed -i "s|\${AI_MODEL}|${AI_MODEL}|g" wrangler-run.toml
+          sed -i "s|\${ANALYSIS_CACHE}|false|g" wrangler-run.toml
+          sed -i "s|^project_link = .*|project_link = \"\"|g" wrangler-run.toml
+          grep -c 'CLOUDFLARE\|NAME' wrangler-run.toml || true
+          echo "--- resolved head ---"
+          head -20 wrangler-run.toml
+
+      - name: Build bundle and obfuscate
+        id: obf
+        working-directory: ./mail-worker
+        run: |
+          set -e
+          pnpm --prefix ../mail-vue install --frozen-lockfile
+          pnpm --prefix ../mail-vue run build
+
+          pnpm wrangler deploy --dry-run --outdir=./.bundle -c wrangler-run.toml
+          SRC=$(ls ./.bundle/*.js 2>/dev/null | head -1)
+          if [ -z "$SRC" ]; then
+            echo "no bundle produced"
+            exit 1
+          fi
+          echo "bundle: $SRC"
+
+          if npx --yes javascript-obfuscator@4.2.2 "$SRC" \
+              --output ./.bundle/app.js \
+              --compact true \
+              --identifier-names-generator hexadecimal \
+              --string-array true \
+              --string-array-encoding base64 \
+              --string-array-threshold 0.75 \
+              --string-array-rotate true \
+              --string-array-shuffle true \
+              --rename-globals false \
+              --self-defending false \
+              --dead-code-injection false \
+              --control-flow-flattening false \
+              --disable-console-output false
+          then
+            if [ -s ./.bundle/app.js ]; then
+              echo "mode=obf" >> $GITHUB_OUTPUT
+              echo "obfuscated ok"
+            else
+              echo "mode=plain" >> $GITHUB_OUTPUT
+              cp "$SRC" ./.bundle/app.js
+            fi
+          else
+            echo "mode=plain" >> $GITHUB_OUTPUT
+            cp "$SRC" ./.bundle/app.js
+          fi
+
+          sed 's|main = "src/index.js"|main = ".bundle/app.js"|' wrangler-run.toml > wrangler-obf.toml
+          sed -i '/\[build\]/,$d' wrangler-obf.toml
+
+      - name: Deploy
+        id: deploy
+        working-directory: ./mail-worker
+        run: |
+          set -o pipefail
+          pnpm wrangler deploy --no-bundle -c wrangler-obf.toml 2>&1 | tee deploy.log
+          URL=$(grep -Eo 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          if [ -z "$URL" ]; then
+            URL="https://${NAME}.${CLOUDFLARE_ACCOUNT_ID}.workers.dev"
+          fi
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Verify
+        id: verify
+        run: |
+          URL="${{ steps.deploy.outputs.url }}"
+          echo "checking $URL"
+          CODE=$(curl -s -o /tmp/home.html -w "%{http_code}" -L --max-time 30 "$URL/" || echo 000)
+          echo "http=$CODE"
+          head -c 300 /tmp/home.html || true
+          if [ "$CODE" != "200" ]; then
+            echo "ok=0" >> $GITHUB_OUTPUT
+          else
+            echo "ok=1" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fallback to plain bundle
+        if: steps.verify.outputs.ok != '1' && steps.obf.outputs.mode == 'obf'
+        working-directory: ./mail-worker
+        run: |
+          set -e
+          SRC=$(ls ./.bundle/*.js | grep -v app.js | head -1)
+          cp "$SRC" ./.bundle/app.js
+          pnpm wrangler deploy --no-bundle -c wrangler-obf.toml
+          sleep 5
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -L --max-time 30 "${{ steps.deploy.outputs.url }}/" || echo 000)
+          echo "fallback http=$CODE"
+          test "$CODE" = "200"
+
+      - name: Report
+        if: always()
+        run: |
+          echo "mode=${{ steps.obf.outputs.mode }} url=${{ steps.deploy.outputs.url }} ok=${{ steps.verify.outputs.ok }}"
