@@ -17,6 +17,7 @@ jobs:
     env:
       NAME: ${{ secrets.NAME }}
       DOMAIN: ${{ secrets.DOMAIN }}
+      CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
       ADMIN: ${{ secrets.ADMIN }}
       PASSWORD: ${{ secrets.PASSWORD }}
       JWT_SECRET: ${{ secrets.JWT_SECRET }}
@@ -46,9 +47,9 @@ jobs:
         run: |
           set -e
           cp wrangler-action.toml wrangler-run.toml
-          sed -i '/\[\[routes\]\]/,/^$/d' wrangler-run.toml
           sed -i '/\[\[r2_buckets\]\]/,/^$/d' wrangler-run.toml
           sed -i "s|\${NAME}|${NAME}|g" wrangler-run.toml
+          sed -i "s|\${CUSTOM_DOMAIN}|${CUSTOM_DOMAIN}|g" wrangler-run.toml
           sed -i "s|\"\${DOMAIN}\"|${DOMAIN}|g" wrangler-run.toml
           sed -i "s|\${ADMIN}|${ADMIN}|g" wrangler-run.toml
           sed -i "s|\${PASSWORD}|${PASSWORD}|g" wrangler-run.toml
@@ -58,14 +59,14 @@ jobs:
           sed -i "s|\${AI_MODEL}|${AI_MODEL}|g" wrangler-run.toml
           sed -i "s|\${ANALYSIS_CACHE}|false|g" wrangler-run.toml
           sed -i "s|^project_link = .*|project_link = \"\"|g" wrangler-run.toml
-          python3 - <<'EOF'
+          python3 - <<'PY'
           p = 'wrangler-run.toml'
           s = open(p).read()
           if 'nodejs_compat' not in s:
               s = s.replace('keep_vars = true', 'keep_vars = true\ncompatibility_flags = ["nodejs_compat"]', 1)
           open(p, 'w').write(s)
-          EOF
-          sed -n '1,8p' wrangler-run.toml
+          PY
+          sed -n '1,22p' wrangler-run.toml
 
       - name: Deploy
         id: deploy
@@ -78,34 +79,27 @@ jobs:
             URL="https://${NAME}.wdss2997.workers.dev"
           fi
           echo "url=$URL" >> $GITHUB_OUTPUT
-          echo "deployed to $URL"
 
-      - name: Verify homepage
-        working-directory: ./mail-worker
+      - name: Verify
         run: |
           URL="${{ steps.deploy.outputs.url }}"
-          ( timeout 50 pnpm wrangler tail --format json -c wrangler-run.toml > /tmp/tail.log 2>&1 & ) || true
-          sleep 12
-          echo "--- GET / ---"
+          echo "--- workers.dev ---"
           CODE=$(curl -s -o /tmp/h -w "%{http_code}" -L --max-time 30 "$URL/" || echo 000)
-          echo "status=$CODE"
-          head -c 300 /tmp/h || true
+          echo "workers_status=$CODE"
+          head -c 200 /tmp/h || true
           echo
-          sleep 20
-          echo "--- tail ---"
-          head -c 3000 /tmp/tail.log || true
+          echo "--- custom domain ---"
+          C=$(curl -s -o /tmp/h2 -w "%{http_code}" -L --max-time 30 "https://${CUSTOM_DOMAIN}/" || echo 000)
+          echo "custom_status=$C"
+          head -c 200 /tmp/h2 || true
           echo
 
-      - name: Verify init
+      - name: Init database
         run: |
-          URL="${{ steps.deploy.outputs.url }}"
-          echo "--- GET /api/init ---"
-          CODE=$(curl -s -o /tmp/i -w "%{http_code}" --max-time 90 "$URL/api/init/${JWT_SECRET}" || echo 000)
-          echo "status=$CODE"
-          head -c 500 /tmp/i || true
-          echo
+          echo "--- init via custom domain ---"
+          R=$(curl -s -w "|%{http_code}" --max-time 90 "https://${CUSTOM_DOMAIN}/api/init/${JWT_SECRET}" || echo "000")
+          echo "result=$R"
 
       - name: Summary
         if: always()
-        run: |
-          echo "url=${{ steps.deploy.outputs.url }}"
+        run: echo "url=${{ steps.deploy.outputs.url }} domain=${CUSTOM_DOMAIN}"
