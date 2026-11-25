@@ -58,7 +58,14 @@ jobs:
           sed -i "s|\${AI_MODEL}|${AI_MODEL}|g" wrangler-run.toml
           sed -i "s|\${ANALYSIS_CACHE}|false|g" wrangler-run.toml
           sed -i "s|^project_link = .*|project_link = \"\"|g" wrangler-run.toml
-          sed -n '1,25p' wrangler-run.toml
+          python3 - <<'EOF'
+          p = 'wrangler-run.toml'
+          s = open(p).read()
+          if 'nodejs_compat' not in s:
+              s = s.replace('keep_vars = true', 'keep_vars = true\ncompatibility_flags = ["nodejs_compat"]', 1)
+          open(p, 'w').write(s)
+          EOF
+          sed -n '1,8p' wrangler-run.toml
 
       - name: Deploy
         id: deploy
@@ -74,12 +81,19 @@ jobs:
           echo "deployed to $URL"
 
       - name: Verify homepage
+        working-directory: ./mail-worker
         run: |
           URL="${{ steps.deploy.outputs.url }}"
+          ( timeout 50 pnpm wrangler tail --format json -c wrangler-run.toml > /tmp/tail.log 2>&1 & ) || true
+          sleep 12
           echo "--- GET / ---"
           CODE=$(curl -s -o /tmp/h -w "%{http_code}" -L --max-time 30 "$URL/" || echo 000)
           echo "status=$CODE"
-          head -c 500 /tmp/h || true
+          head -c 300 /tmp/h || true
+          echo
+          sleep 20
+          echo "--- tail ---"
+          head -c 3000 /tmp/tail.log || true
           echo
 
       - name: Verify init
