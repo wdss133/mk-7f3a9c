@@ -6,7 +6,7 @@ on:
 jobs:
   diag:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
 
     env:
       DOMAIN: ${{ secrets.DOMAIN }}
@@ -39,7 +39,6 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm run build
-          ls -la ../mail-worker/dist/ | head -20
 
       - name: Base config
         working-directory: ./mail-worker
@@ -67,8 +66,7 @@ jobs:
           PY
           sed -i '/\[build\]/,$d' wrangler-diag.toml
 
-      - name: Probe bindings
-        continue-on-error: true
+      - name: Probe no send_email
         working-directory: ./mail-worker
         run: |
           cat > src/probe.js <<'JS'
@@ -78,55 +76,28 @@ jobs:
           }
           export default {
             async fetch(req, env) {
-              const out = {
+              return new Response(JSON.stringify({
                 path: new URL(req.url).pathname,
                 assets: typeof env.assets,
                 db: typeof env.db,
                 kv: typeof env.kv,
                 ai: typeof env.ai,
-                r2: typeof env.r2,
-                forward: typeof env.forward,
-                hasAssetsBinding: !!env.assets,
-              };
-              return new Response(JSON.stringify(out, null, 2), {
-                status: 200,
-                headers: { 'content-type': 'application/json; charset=utf-8' }
-              });
+                forward: typeof env.forward
+              }, null, 2), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
             }
           };
           JS
-          sed 's|main = "src/index.js"|main = "src/probe.js"|' wrangler-diag.toml > wrangler-probe.toml
-          pnpm wrangler deploy -c wrangler-probe.toml > deploy-probe.log 2>&1
-          grep -E "env\.|Uploaded|ERROR" deploy-probe.log | head -20
-          sleep 10
+          cp wrangler-diag.toml wrangler-noemail.toml
+          sed -i '/\[\[send_email\]\]/,/^$/d' wrangler-noemail.toml
+          sed -i 's|main = "src/index.js"|main = "src/probe.js"|' wrangler-noemail.toml
+          echo "--- bindings in config ---"
+          grep -E "^\[\[|^\[|^name|^binding" wrangler-noemail.toml | head -30
+          pnpm wrangler deploy -c wrangler-noemail.toml 2>&1 | tee d1.log | grep -E "env\.|Uploaded|ERROR|error" | head -20
+          sleep 12
           B="https://wk-diag.2997875227.workers.dev"
-          echo "=== /api/probe (bindings) ==="
-          curl -s -w "\nstatus=%{http_code}\n" --max-time 30 "$B/api/probe" | head -c 800
-          echo "=== /index.html ==="
-          curl -s -o /tmp/ih -w "status=%{http_code}\n" --max-time 30 "$B/index.html"
-          head -c 120 /tmp/ih; echo
-          echo "=== / ==="
-          curl -s -o /tmp/root -w "status=%{http_code}\n" --max-time 30 "$B/"
-          head -c 200 /tmp/root; echo
-
-      - name: Probe import only
-        continue-on-error: true
-        working-directory: ./mail-worker
-        run: |
-          cat > src/importonly.js <<'JS'
-          import './index.js';
-          import { MailHub } from './websocket/hub';
-          export { MailHub };
-          export default {
-            fetch() {
-              return new Response('IMPORT-OK', { status: 200 });
-            }
-          };
-          JS
-          sed 's|main = "src/index.js"|main = "src/importonly.js"|' wrangler-diag.toml > wrangler-imp.toml
-          pnpm wrangler deploy -c wrangler-imp.toml > deploy-imp.log 2>&1
-          tail -5 deploy-imp.log
-          sleep 10
-          B="https://wk-diag.2997875227.workers.dev"
-          echo "=== /api/probe (import only) ==="
-          curl -s -w "\nstatus=%{http_code}\n" --max-time 30 "$B/api/probe" | head -c 800
+          echo "=== no-email /api/probe ==="
+          curl -s -w "\nstatus=%{http_code}\n" --max-time 30 "$B/api/probe" | head -c 900
+          echo
+          echo "=== no-email / ==="
+          curl -s -o /tmp/r1 -w "status=%{http_code}\n" --max-time 30 "$B/"
+          head -c 200 /tmp/r1
